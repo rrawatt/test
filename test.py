@@ -8,12 +8,7 @@
 #     "rich",
 # ]
 # ///
-from google.colab import files
-import pandas as pd
-import time
-import os
-import random
-import sys
+
 import argparse
 import base64
 import dotenv
@@ -395,13 +390,6 @@ def evaluate_output_quality(id: str, path: str, evals: list[Eval]):
         evals.append(Eval(total if ans["answer"] else 0, total, attr, ans["reasoning"]))
 
 
-from google.colab import files
-import pandas as pd
-import time
-import os
-import random
-import sys
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate student project submissions")
     parser.add_argument("url", nargs="*", help="GitHub raw URL for submission(s)")
@@ -410,6 +398,7 @@ if __name__ == "__main__":
     if os.getenv("SUBMISSION_URL"):
         submissions_form = pd.read_csv(os.environ["SUBMISSION_URL"])
 
+    # If URLs or student IDs are passed, get submissions from that
     requested_ids = set()
     if len(args.url):
         submissions = []
@@ -423,8 +412,10 @@ if __name__ == "__main__":
                 submissions.append(match.to_list()[:3])
         submissions = pd.DataFrame(submissions)
         requested_ids = set(submissions[submissions.columns[1]].str.split("@").str[0])
+    # Else, the faculty will get all submissions from the Google Sheet and evaluate
     elif os.getenv("SUBMISSION_URL"):
         submissions = submissions_form
+    # Else, raise an error
     else:
         error = "[red]Missing URL[/red]: Usage `uv run project2.py https://raw.githubusercontent.com/...`"
         log(error, last=True)
@@ -433,32 +424,42 @@ if __name__ == "__main__":
     submissions["id"] = submissions[submissions.columns[1]].str.split("@").str[0]
     submissions["head"] = submissions[submissions.columns[2]].apply(parse_github_url)
 
+    # Pick a random sample of submissions to evaluate
     if os.getenv("SAMPLE_SUBMISSIONS"):
         size = int(os.getenv("SAMPLE_SUBMISSIONS"))
         if size < len(submissions):
             submissions = submissions.sample(size)
 
+    # If we're continuing from where we left off, read the results
     results = []
     if os.getenv("CONTINUE") == "Y":
         result = pd.read_csv(os.path.join(root, "results.csv"))
+        # Remove results for explicitly requested submissions
         results = [result[~result.id.isin(requested_ids)]]
         ids = results[0].id.unique()
+        # Skip submissions that we've already evaluated
         skip = submissions.id.isin(ids)
         submissions = submissions[~skip]
         log(f"[green]Skipped[/green] {sum(skip)} submissions", last=True)
 
+    # Now, evalute each submission
     for _, row in submissions.iterrows():
         evals = []
         try:
             start = time.time()
 
+            # Make sure other submmissions haven't overwritten the dataset
             download_datasets()
+
+            # Clone the repo and check for the MIT license and required files
             clone_latest_branch(row.id, row["head"], deadline, evals)
             has_mit_license(row.id, evals)
             has_required_files(row.id, evals)
 
+            # Code evaluation
             evaluate_code_quality(row.id, evals)
 
+            # Submission: Run evaluation for each sample dataset
             success = {}
             datasets = list(sample_datasets.keys())
             datasets = datasets[:int(os.getenv("LIMIT_SAMPLE_DATASETS_RUN", len(sample_datasets)))]
@@ -466,8 +467,10 @@ if __name__ == "__main__":
                 for dataset in datasets:
                     success[dataset] = run_on_dataset(row.id, dataset, evals, 0.5)
                 all_ran = 0.5 if all(success.values()) else 0.0
-                evals.append(Eval(all_ran, 0.5, "uv run autolysis *", "ran" if all_ran else "did not run all"))
+                msg = "ran" if all_ran else "did not run all"
+                evals.append(Eval(all_ran, 0.5, "uv run autolysis *", msg))
 
+            # Evaluate one random output from successful runs of sample datasets
             samples_ran = []
             for dataset in sample_datasets:
                 if not get_output_files(row.id, os.path.join("eval", dataset)).error:
@@ -476,6 +479,7 @@ if __name__ == "__main__":
                 random.seed(row.id + os.getenv("AIPROXY_TOKEN", ""), version=2)
                 evaluate_output_quality(row.id, random.choice(samples_ran), evals)
 
+            # Evaluate test datasets
             if os.getenv("SKIP_TEST_DATASETS") != "Y":
                 for dataset, id in test_datasets.items():
                     run_on_dataset(row.id, dataset, evals, 0.0)
@@ -486,27 +490,21 @@ if __name__ == "__main__":
             results.append(result)
             score, total = round(result.marks.sum(), 2), round(result.total.sum(), 2)
             duration = time.time() - start
-            log(f"[blue]{row.id}[/blue] [yellow]{duration:.0f}s[/yellow] [green]SCORE[/green] {score} / {total}", last=True)
-
+            msg = f"[blue]{row.id}[/blue] [yellow]{duration:.0f}s[/yellow]"
+            log(f"{msg} [green]SCORE[/green] {score} / {total}", last=True)
         except Exception as e:
-            log(f"[red]UNEXPECTED FAILURE[/red] {e}", last=True)
+            log(f"{msg} [red]UNEXPECTED FAILURE[/red] {e}", last=True)
             continue
 
-    if len(results):
-        out = pd.concat(results)
-        out["correct"] = out.apply(lambda row: row.marks == row.total, axis=1).astype(int)
-        out["reason"] = out.apply(lambda row: row.reason.replace("\n", " "), axis=1)
-        
-        # Display the output directly in the notebook
-        print(out)  # Outputs the DataFrame as a CSV text
-        
-        # Optionally, allow the user to download the CSV from Colab
-        out_csv = out.to_csv(index=False)
-        with open('/tmp/results.csv', 'w') as f:
-            f.write(out_csv)
+        if len(results):
+            # Print only the last result if there's only one submission (plus history)
+            if len(results) <= 2:
+                print(pd.DataFrame(results[-1]))
 
-        # Download the CSV
-        files.download('/tmp/results.csv')  # This will prompt the user to download the file
+            # Save the results to a CSV file on each iteration
+            out = pd.concat(results)
+            out["correct"] = out.apply(lambda row: row.marks == row.total, axis=1).astype(int)
+            out["reason"] = out.apply(lambda row: row.reason.replace("\n", " "), axis=1)
+            out.to_csv(os.path.join(root, "results.csv"), index=False)
 
-        log(f"[green]Results[/green]: CSV available for download.")
-
+    log(f"[green]Results[/green]: {os.path.join(root, 'results.csv')}", last=True)
