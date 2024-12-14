@@ -27,6 +27,12 @@ from platformdirs import user_data_dir
 from rich.console import Console
 from subprocess import run, PIPE
 
+# Set pandas display options to show the full DataFrame without truncation
+pd.set_option('display.max_rows', None)  # No limit on rows
+pd.set_option('display.max_columns', None)  # No limit on columns
+pd.set_option('display.width', None)  # Adjust width to fit the screen
+pd.set_option('display.max_colwidth', None)  # No truncation for column width
+
 # Deadline for repo is 15 Dec 2024 EOD AOE. If you're hacking dates, remember:
 # 1. Change your commit time to before the deadline
 # 2. We'll clone at some unknown time after this deadline. Time it before that.
